@@ -11,11 +11,13 @@ import json
 import os
 import select
 import socket
+import struct
 import subprocess
 import tempfile
 import threading
 import time
 import urllib.request
+import zlib
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote
@@ -111,9 +113,91 @@ def load_channels():
             "effectiveAt": version["effectiveAtMs"] / 1000,
             "startIndex": version["startIndex"],
             "items": manifests[version["manifest"]]["items"],
+            "logo": render_logo(channel.get("logomark"), channel.get("color")),
         }
 
     return loaded
+
+
+# --- Channel logos ----------------------------------------------------------
+# Spelunkr logos are 32x32 grids of palette letters. The palette and colour
+# maths are ported from the spelunkr.tv player so the logos match the site.
+
+FIXED_PALETTE = {
+    "k": "#0b0f26", "n": "#2a3580", "s": "#8899cc",
+    "p": "#e8eaf0", "g": "#ffd740", "o": "#d2500c",
+}
+LOGO_SCALE = 8
+
+
+def hex_to_hsv(colour):
+    r, g, b = (int(colour[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    high, low = max(r, g, b), min(r, g, b)
+    spread = high - low
+    hue = 0.0
+    if spread:
+        if high == r:
+            hue = ((g - b) / spread + (6 if g < b else 0)) / 6
+        elif high == g:
+            hue = ((b - r) / spread + 2) / 6
+        else:
+            hue = ((r - g) / spread + 4) / 6
+    return hue * 360, (spread / high * 100 if high else 0), high * 100
+
+
+def hsv_to_rgb(hue, sat, val):
+    sat, val = sat / 100, val / 100
+
+    def channel(n):
+        k = (n + hue / 60) % 6
+        return round(255 * (val - val * sat * max(0, min(k, 4 - k, 1))))
+
+    return channel(5), channel(3), channel(1)
+
+
+def hue_toward(hue, target, step):
+    delta = (target - hue + 540) % 360 - 180
+    sign = (delta > 0) - (delta < 0)
+    return (hue + sign * min(step, abs(delta)) + 360) % 360
+
+
+def logo_palette(colour):
+    if not (isinstance(colour, str) and len(colour) == 7 and colour.startswith("#")):
+        colour = "#666666"
+    hue, sat, val = hex_to_hsv(colour.lower())
+    palette = {k: tuple(int(v[i:i + 2], 16) for i in (1, 3, 5)) for k, v in FIXED_PALETTE.items()}
+    palette["c"] = tuple(int(colour[i:i + 2], 16) for i in (1, 3, 5))
+    palette["d"] = hsv_to_rgb(hue_toward(hue, 255, 14), min(100, sat * 1.1), val * 0.6)
+    palette["l"] = hsv_to_rgb(hue_toward(hue, 50, 10), sat * 0.6, val + (100 - val) * 0.6)
+    return palette
+
+
+def render_logo(logomark, colour):
+    """Render a pixel logomark as PNG bytes, or None if there isn't one."""
+    rows = (logomark or {}).get("rows")
+    if (logomark or {}).get("type") != "pixel" or not rows:
+        return None
+
+    palette = logo_palette(colour)
+    raw = bytearray()
+    for row in rows:
+        line = bytearray()
+        for cell in row:
+            pixel = bytes((0, 0, 0, 0)) if cell == "." else bytes((*palette.get(cell, palette["p"]), 255))
+            line += pixel * LOGO_SCALE
+        raw += (b"\x00" + line) * LOGO_SCALE
+
+    def chunk(kind, data):
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    size = len(rows) * LOGO_SCALE
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+        + chunk(b"IEND", b"")
+    )
 
 
 def refresh_loop():
@@ -242,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
         log("%s - %s" % (self.address_string(), fmt % args))
 
     def send_body(self, body, content_type):
-        data = body.encode()
+        data = body if isinstance(body, bytes) else body.encode()
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
@@ -279,6 +363,11 @@ class Handler(BaseHTTPRequestHandler):
             channel = current.get(path[len("/auto/v"):])
             if channel:
                 return self.stream(channel)
+
+        if path.startswith("/logo/") and path.endswith(".png"):
+            channel = current.get(path[len("/logo/"):-len(".png")])
+            if channel and channel["logo"]:
+                return self.send_body(channel["logo"], "image/png")
 
         self.send_error(404)
 
@@ -429,7 +518,8 @@ def guide_xml(current):
             f'<display-name>{c["number"]} {escape(c["name"])}</display-name>'
             f'<display-name>{c["number"]}</display-name>'
             f'<display-name>{escape(c["name"])}</display-name>'
-            f'</channel>'
+            + (f'<icon src="{logo_url(c)}" />' if c["logo"] else "")
+            + '</channel>'
         )
 
     now = time.time()
@@ -449,14 +539,21 @@ def guide_xml(current):
     return "\n".join(out)
 
 
+def logo_url(channel):
+    return f"{BASE_URL}/logo/{channel['number']}.png"
+
+
 def playlist(current):
-    out = ["#EXTM3U"]
-    for entry in lineup(current):
+    # url-tvg / x-tvg-url let IPTV apps find the guide from the playlist alone.
+    guide = f"{BASE_URL}/guide.xml"
+    out = [f'#EXTM3U url-tvg="{guide}" x-tvg-url="{guide}"']
+    for c in sorted(current.values(), key=lambda c: int(c["number"])):
+        logo = f' tvg-logo="{logo_url(c)}"' if c["logo"] else ""
         out.append(
-            f'#EXTINF:-1 tvg-id="{entry["GuideNumber"]}" tvg-chno="{entry["GuideNumber"]}" '
-            f'group-title="Spelunkr",{entry["GuideName"]}'
+            f'#EXTINF:-1 tvg-id="{c["number"]}" tvg-chno="{c["number"]}" '
+            f'tvg-name="{c["name"]}"{logo} group-title="Spelunkr",{c["name"]}'
         )
-        out.append(entry["URL"])
+        out.append(f"{BASE_URL}/auto/v{c['number']}")
     return "\n".join(out) + "\n"
 
 
