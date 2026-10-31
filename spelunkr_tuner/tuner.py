@@ -9,6 +9,7 @@ cheap enough to run on a small box such as a Home Assistant host.
 
 import json
 import os
+import select
 import socket
 import subprocess
 import tempfile
@@ -50,6 +51,8 @@ REFRESH_HOURS = float(option("refresh_hours", "6"))
 GUIDE_HOURS = int(option("guide_hours", "48"))
 # How far ahead each FFmpeg run is scheduled; it restarts after this.
 STREAM_HOURS = float(option("stream_hours", "6"))
+# Restart FFmpeg if it produces nothing for this long.
+STALL_SECONDS = 30
 
 UPSTREAMS = [
     "https://data.spelunkr.tv/",
@@ -298,40 +301,72 @@ class Handler(BaseHTTPRequestHandler):
                 active_streams -= 1
             return
 
-        process = None
+        # A write only fails once FFmpeg produces something, so a stalled
+        # FFmpeg would otherwise hold a tuner forever. The watchdog notices a
+        # vanished client or a stall and kills FFmpeg to unblock the loop.
+        state = {"process": None, "last_data": time.time(), "gone": False}
+        done = threading.Event()
+
+        def watchdog():
+            while not done.wait(1):
+                state["gone"] = state["gone"] or client_gone(self.connection)
+                stalled = time.time() - state["last_data"] > STALL_SECONDS
+                process = state["process"]
+                if process and process.poll() is None and (state["gone"] or stalled):
+                    if not state["gone"]:
+                        log(f"{channel['name']}: no data for {STALL_SECONDS}s, restarting ffmpeg")
+                    process.kill()
+
+        threading.Thread(target=watchdog, daemon=True).start()
         concat_path = None
         try:
-            while True:
+            while not state["gone"]:
                 now = time.time()
                 _, item, offset = next(schedule(channel, now, 0.01))
                 log(f"{channel['name']}: {item['title']} at {offset:.0f}s ({MODE})")
 
                 concat_path = write_concat(channel, now)
-                process = subprocess.Popen(
+                state["last_data"] = time.time()
+                state["process"] = process = subprocess.Popen(
                     ffmpeg_command(concat_path), stdout=subprocess.PIPE, bufsize=0
                 )
                 while True:
                     chunk = process.stdout.read(188 * 348)
                     if not chunk:
                         break
+                    state["last_data"] = time.time()
                     self.wfile.write(chunk)
 
                 process.wait()
-                log(f"{channel['name']}: ffmpeg exited {process.returncode}, continuing")
                 os.unlink(concat_path)
                 concat_path = None
+                if state["gone"]:
+                    break
+                log(f"{channel['name']}: ffmpeg exited {process.returncode}, continuing")
                 if time.time() - now < 5:
-                    time.sleep(5)  # avoid hammering archive.org if it keeps failing
+                    done.wait(5)  # avoid hammering archive.org if it keeps failing
+            log(f"{channel['name']}: client disconnected")
         except (BrokenPipeError, ConnectionResetError):
             log(f"{channel['name']}: client disconnected")
         finally:
+            done.set()
+            process = state["process"]
             if process and process.poll() is None:
-                process.terminate()
+                process.kill()
                 process.wait()
             if concat_path:
                 os.unlink(concat_path)
             with active_lock:
                 active_streams -= 1
+
+
+def client_gone(sock):
+    """True once the client has closed its end of the connection."""
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+        return bool(readable) and sock.recv(1, socket.MSG_PEEK) == b""
+    except OSError:
+        return True
 
 
 # --- HDHomeRun / guide documents --------------------------------------------
