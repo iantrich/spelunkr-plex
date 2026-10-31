@@ -1,0 +1,26 @@
+name: Spelunkr Tuner
+version: "0.1.0"
+slug: spelunkr_tuner
+description: Spelunkr channels as an HDHomeRun tuner for Plex Live TV
+url: https://spelunkr.tv
+arch:
+  - aarch64
+  - amd64
+startup: application
+boot: auto
+init: false
+# Host networking so Plex sees the tuner at the HA host's LAN address.
+host_network: true
+webui: "http://[HOST]:[PORT:5004]/"
+ports:
+  5004/tcp: 5004
+ports_description:
+  5004/tcp: Tuner, guide and status page
+options:
+  mode: copy
+  tuner_count: 4
+schema:
+  base_url: url?
+  mode: list(copy|transcode)
+  tuner_count: int(1,8)
+  guide_hours: int(6,168)?
