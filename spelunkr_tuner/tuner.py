@@ -214,11 +214,17 @@ def ffmpeg_command(concat_path):
     if MODE == "transcode":
         command += [
             "-vf", "scale=-2:720,fps=30000/1001",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-            "-g", "60", "-c:a", "aac", "-b:a", "160k", "-ac", "2", "-ar", "48000",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-g", "60",
         ]
     else:
-        command += ["-c", "copy"]
+        command += ["-c:v", "copy"]
+    # Audio is always re-encoded (cheap). Plex's transcoder fails with
+    # "sample rate not set" on AAC copied straight from the MP4s, and this
+    # also keeps the format identical across show changes.
+    command += [
+        "-af", "aresample=async=1",
+        "-c:a", "aac", "-b:a", "160k", "-ac", "2", "-ar", "48000",
+    ]
     return command + [
         "-f", "mpegts", "-mpegts_flags", "+resend_headers", "pipe:1",
     ]
