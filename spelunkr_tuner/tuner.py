@@ -43,6 +43,7 @@ PORT = int(option("port", "5004"))
 BASE_URL = option("base_url", f"http://{lan_ip()}:{PORT}").rstrip("/")
 # copy = remux only (cheap); transcode = normalise to 720p H.264/AAC (needs CPU)
 MODE = option("mode", "copy")
+AUDIO_CODEC = option("audio_codec", "ac3")  # ac3 or aac
 TUNER_COUNT = int(option("tuner_count", "4"))
 DEVICE_ID = option("device_id", "5E1C0A01")
 REFRESH_HOURS = float(option("refresh_hours", "6"))
@@ -218,12 +219,13 @@ def ffmpeg_command(concat_path):
         ]
     else:
         command += ["-c:v", "copy"]
-    # Audio is always re-encoded (cheap). Plex's transcoder fails with
-    # "sample rate not set" on AAC copied straight from the MP4s, and this
-    # also keeps the format identical across show changes.
+    # Audio is always re-encoded (cheap) so it is identical across show
+    # changes. AC3 by default: FFmpeg only learns AAC's sample rate and
+    # channels by decoding it, and Plex fails with "sample rate not set"
+    # when its AAC decoder is missing, whereas AC3's are read from headers.
     command += [
         "-af", "aresample=async=1",
-        "-c:a", "aac", "-b:a", "160k", "-ac", "2", "-ar", "48000",
+        "-c:a", AUDIO_CODEC, "-b:a", "192k", "-ac", "2", "-ar", "48000",
     ]
     return command + [
         "-f", "mpegts", "-mpegts_flags", "+resend_headers", "pipe:1",

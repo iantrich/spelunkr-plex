@@ -24,6 +24,7 @@ Options:
 |---------------|----------------|----------------------------------------------------------------|
 | `base_url`    | auto-detected  | Address Plex uses to reach the tuner, e.g. `http://192.168.1.10:5004` |
 | `mode`        | `copy`         | `copy` remuxes only; `transcode` normalises to 720p H.264 (CPU heavy) |
+| `audio_codec` | `ac3`          | Audio sent to Plex: `ac3` (works without Plex's AAC codec) or `aac` |
 | `tuner_count` | `4`            | How many channels can stream at once                           |
 | `guide_hours` | `48`           | How far ahead the guide goes                                    |
 

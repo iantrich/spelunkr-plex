@@ -1,5 +1,5 @@
 name: Spelunkr Tuner
-version: "0.1.1"
+version: "0.1.2"
 slug: spelunkr_tuner
 description: Spelunkr channels as an HDHomeRun tuner for Plex Live TV
 url: https://spelunkr.tv
@@ -18,9 +18,11 @@ ports_description:
   5004/tcp: Tuner, guide and status page
 options:
   mode: copy
+  audio_codec: ac3
   tuner_count: 4
 schema:
   base_url: url?
   mode: list(copy|transcode)
+  audio_codec: list(ac3|aac)
   tuner_count: int(1,8)
   guide_hours: int(6,168)?
